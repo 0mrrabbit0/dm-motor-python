@@ -19,7 +19,7 @@ After this script:
 import sys
 import time
 import threading
-from dm_sdk import DmDevice, REC_CALLBACK
+from dm_motor import DmDevice, REC_CALLBACK
 
 CAN_ID = 0x01
 RID_CAN_BR = 35

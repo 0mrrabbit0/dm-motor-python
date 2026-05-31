@@ -7,7 +7,7 @@ import sys
 import time
 import threading
 
-from dm_sdk import DmDevice, REC_CALLBACK
+from dm_motor import DmDevice, REC_CALLBACK
 
 
 def main():

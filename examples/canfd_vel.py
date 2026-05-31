@@ -6,7 +6,7 @@ import sys
 import time
 import signal
 
-from dm_sdk import DmDevice
+from dm_motor import DmDevice
 
 CAN_ID = 0x01
 MST_ID = 0x11
