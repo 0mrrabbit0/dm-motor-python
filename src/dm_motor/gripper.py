@@ -159,6 +159,11 @@ class GripperController:
         self._traj_end_time = 0.0     # time when trajectory finished
         self._kd_motion = 0.5         # Kd during motion
 
+        # Stall detection for hybrid mode
+        self._stall_pos = 0.0
+        self._stall_time = 0.0
+        self._stalled = False
+
         # LuGre friction compensation (loaded from gripper_friction.json)
         self._lugre: LuGreModel | None = None
 
@@ -534,16 +539,13 @@ class GripperController:
         self._ensure_loop()
 
     def grip(self, angle_rad: float, force_limit: float, duration: float | None = None):
-        """Hybrid mode: move to angle with force limit."""
+        """Hybrid mode: move to angle with force limit (always positive Nm)."""
         angle_rad = self._clamp_angle(angle_rad)
         force_limit = max(0.01, min(abs(force_limit), self.tau_safety))
-        dur = duration or self._compute_duration(angle_rad)
         with self._lock:
             self._mode = GripperMode.HYBRID
             self._target_angle = angle_rad
             self._force_limit = force_limit
-            self._traj = MinJerkTrajectory(self._pos, angle_rad, dur)
-            self._traj_done = False
             self._set_state(GripperState.TRACKING)
         self._ensure_loop()
 
@@ -708,64 +710,16 @@ class GripperController:
 
     def _step_hybrid(self, target_angle: float, force_limit: float,
                      traj: MinJerkTrajectory | None):
-        tau_abs = abs(self._tau)
-        threshold_high = force_limit
-        threshold_low = force_limit * self.hysteresis
-        threshold_comply = force_limit * 1.5
+        """Force-limited position control.
 
-        current_state = self._state
-
-        if current_state == GripperState.TRACKING:
-            if tau_abs >= threshold_high:
-                self._hold_angle = self._pos
-                self._set_state(GripperState.HOLDING)
-                with self._lock:
-                    self._traj = None
-                    self._traj_done = True
-                self._send_mit(self.kp_hold, self.kd_hold, q=self._hold_angle)
-            else:
-                if traj and not self._traj_done:
-                    q_des, dq_des, done = traj.sample()
-                    if done:
-                        with self._lock:
-                            self._traj_done = True
-                        q_des = target_angle
-                        dq_des = 0.0
-                        kd = self.kd_track
-                    else:
-                        kd = 0.5
-                else:
-                    q_des = target_angle
-                    dq_des = 0.0
-                    kd = self.kd_track
-                error = q_des - self._pos
-                tau_pd = self.kp_track * error
-                if self._lugre is not None:
-                    f_friction = self._lugre.step(self._vel, _LOOP_PERIOD_S)
-                    tau_raw = tau_pd + f_friction
-                else:
-                    tau_raw = tau_pd
-                tau_raw = max(-self.tau_safety, min(self.tau_safety, tau_raw))
-                tau_cmd = self._filter_tau(tau_raw)
-                self._send_mit(0, kd, dq=dq_des, tau=tau_cmd)
-
-        elif current_state == GripperState.HOLDING:
-            if tau_abs >= threshold_comply:
-                self._set_state(GripperState.COMPLYING)
-                self._send_mit(0, self.kd_comply)
-            elif tau_abs < threshold_low:
-                self._set_state(GripperState.TRACKING)
-            else:
-                self._send_mit(self.kp_hold, self.kd_hold, q=self._hold_angle)
-
-        elif current_state == GripperState.COMPLYING:
-            if tau_abs < threshold_low:
-                self._set_state(GripperState.TRACKING)
-            else:
-                self._send_mit(0, self.kd_comply)
-
-        else:
-            self._set_state(GripperState.TRACKING)
+        Pushes toward target with at most ±force_limit torque.
+        Stops when blocked, resumes when released.
+        """
+        self._set_state(GripperState.TRACKING)
+        error = target_angle - self._pos
+        tau = self.kp_track * error
+        tau = max(-force_limit, min(force_limit, tau))
+        self._send_mit(0, self.kd_track, tau=tau)
 
     # ── Safety ──
 

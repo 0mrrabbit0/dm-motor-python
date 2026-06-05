@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /home/ubuntu/RhinoV2.0_Gripper -type f -name \"*.py\" -o -name \"*.cpp\" -o -name \"*.h\" -o -name \"*.c\" -o -name \"*.json\" -o -name \"*.yaml\" -o -name \"*.yml\" -o -name \"*.md\" -o -name \"*.txt\" | head -100)",
+      "Read(//home/ubuntu/RhinoV2.0_Gripper/**)",
+      "Bash(fuser /dev/bus/usb/003/012)",
+      "WebSearch",
+      "WebFetch(domain:www.sciencedirect.com)",
+      "WebFetch(domain:ietresearch.onlinelibrary.wiley.com)",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:proceedings.mlr.press)",
+      "WebFetch(domain:link.springer.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:dl.acm.org)",
+      "WebFetch(domain:ieeexplore.ieee.org)",
+      "WebFetch(domain:python-control.readthedocs.io)",
+      "WebFetch(domain:chen-qiming.github.io)",
+      "WebFetch(domain:idp.springer.com)",
+      "WebFetch(domain:doi.org)",
+      "WebFetch(domain:scholar.google.com)",
+      "WebFetch(domain:www.researchgate.net)",
+      "WebFetch(domain:linkinghub.elsevier.com)",
+      "WebFetch(domain:www.mdpi.com)",
+      "WebFetch(domain:faculty.cqu.edu.cn)",
+      "WebFetch(domain:www.nature.com)",
+      "Bash(pdftotext /home/ubuntu/.claude/projects/-home-ubuntu-dm-motor-python/d85516c8-82fa-43dc-b56c-d5400809f4e4/tool-results/webfetch-1780626581864-k4sjgl.pdf -)",
+      "Bash(pdftotext /home/ubuntu/.claude/projects/-home-ubuntu-dm-motor-python/d85516c8-82fa-43dc-b56c-d5400809f4e4/tool-results/webfetch-1780626491650-ye943c.pdf /tmp/cep2020.txt)",
+      "Read(//tmp/**)",
+      "WebFetch(domain:mdpi-res.com)",
+      "WebFetch(domain:idp.nature.com)",
+      "WebFetch(domain:mdpi.com)",
+      "WebFetch(domain:re.public.polimi.it)",
+      "WebFetch(domain:pdfs.semanticscholar.org)",
+      "Bash(pdftotext \"/home/ubuntu/.claude/projects/-home-ubuntu-dm-motor-python/d85516c8-82fa-43dc-b56c-d5400809f4e4/tool-results/webfetch-1780626620488-4rld3w.pdf\" /tmp/mfac_paper.txt)",
+      "WebFetch(domain:pure.nwpu.edu.cn)",
+      "WebFetch(domain:www.semanticscholar.org)",
+      "WebFetch(domain:openreview.net)",
+      "Bash(python3 -c \"import matplotlib; print\\(f'matplotlib {matplotlib.__version__}'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ubuntu/dm-motor-python/src/dm_motor/gripper.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+    ]
+  }
+}
