@@ -1,7 +1,7 @@
 [project]
 name = "dm-motor"
-version = "0.1.0"
-description = "Python ctypes wrapper for Damiao motor DM_DeviceSDK"
+version = "0.4.0"
+description = "DM4310 gripper SDK + motor control library"
 requires-python = ">=3.10"
 
 [build-system]
@@ -10,3 +10,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+dm_gripper = ["*.json"]
