@@ -48,7 +48,7 @@ _DEFAULT_KD_COMPLY = 2.0
 _DEFAULT_KD_TORQUE = 0.5
 
 _DEFAULT_TAU_FRICTION = 0.3   # Coulomb friction compensation (Nm)
-_DEFAULT_MOVE_DURATION = 2.5  # full travel duration (s), shorter moves scale down
+_DEFAULT_MOVE_DURATION = 1.0  # full travel duration (s) — validated smooth at 0.6s/60%
 
 _DEFAULT_HYSTERESIS = 0.8
 _DEFAULT_TAU_SAFETY = 8.0
@@ -155,6 +155,8 @@ class GripperController:
         self._t_mos = 0
         self._t_rotor = 0
         self._tau_cmd_filtered = 0.0  # low-pass filtered torque command
+        self._traj_end_time = 0.0     # time when trajectory finished
+        self._kd_motion = 0.5         # Kd during motion
 
     # ── Calibration ──
 
@@ -550,15 +552,17 @@ class GripperController:
             if done:
                 with self._lock:
                     self._traj_done = True
+                self._traj_end_time = time.monotonic()
                 q_des = target
                 dq_des = 0.0
-                kd = self.kd_track       # full damping for settling
-            else:
-                kd = 0.5                  # low Kd during motion to avoid amplifying ripple
+            kd = self._kd_motion
         else:
             q_des = target
             dq_des = 0.0
-            kd = self.kd_track
+            # Smooth Kd ramp: 0.5 → 2.0 over 300ms after trajectory ends
+            t_since_end = time.monotonic() - self._traj_end_time if self._traj_end_time > 0 else 10.0
+            ramp = min(1.0, t_since_end / 0.3)
+            kd = self._kd_motion + (self.kd_track - self._kd_motion) * ramp
 
         error = q_des - self._pos
         tau_raw = self.kp_track * error
@@ -673,12 +677,18 @@ class GripperController:
         return max(lo, min(hi, angle))
 
     def _compute_duration(self, target: float) -> float:
-        """Scale move duration by distance."""
+        """Scale move duration by distance, capping peak velocity."""
         dist = abs(target - self._pos)
+        if dist < 0.01:
+            return 0.1
         if not self._calibrated:
             return self.move_duration
         total_travel = abs(self._angle_open - self._angle_close)
         if total_travel < 0.01:
             return self.move_duration
-        # Proportional: full travel = move_duration, shorter = faster (min 0.1s)
-        return max(0.1, self.move_duration * dist / total_travel)
+        # Proportional scaling
+        dur_proportional = self.move_duration * dist / total_travel
+        # Min-jerk peak velocity = dist * 1.875 / duration
+        # Cap peak velocity at 14 rad/s — prevents settling oscillation on short moves
+        dur_vel_limit = dist * 1.875 / 14.0
+        return max(dur_proportional, dur_vel_limit, 0.15)
