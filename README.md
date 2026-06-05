@@ -13,19 +13,27 @@
 ```
 ├── src/dm_motor/          # 核心库（pip install -e . 后可 import）
 │   ├── __init__.py
-│   └── sdk.py
+│   ├── sdk.py                 # 底层 CAN 通信 + 4 种控制模式
+│   └── gripper.py             # 夹爪控制器（力位混合）
 ├── examples/              # 使用示例
 │   ├── classic_can_mit.py     # 1Mbps 经典 CAN MIT 模式
 │   ├── canfd_vel.py           # 5Mbps CAN-FD VEL 模式
-│   └── canfd_mit.py           # 5Mbps CAN-FD MIT 模式（推荐起点）
+│   ├── canfd_mit.py           # 5Mbps CAN-FD MIT 模式（推荐起点）
+│   └── gripper_demo.py        # 夹爪三模式交互 demo
 ├── tools/                 # 实用工具
 │   ├── set_baud.py            # 写电机波特率到 flash
 │   ├── read_params.py         # 读电机关键寄存器
 │   ├── probe_one.py           # 单组合 CAN-FD 参数探测
 │   └── probe_runner.sh        # 批量探测 runner
+├── vendor/                # 第三方二进制依赖
+│   └── dm_device_sdk/         # 达妙 DM_DeviceSDK (v1.1.0)
+│       ├── include/               # C 头文件 (dmcan.h)
+│       └── linux/{x86_64,arm64}/  # 平台原生 .so
 ├── docs/                  # 文档
 │   ├── learning_notes.md      # CAN/CAN-FD 系统学习笔记
-│   └── troubleshooting.md     # 实战故障排查文档
+│   ├── troubleshooting.md     # 实战故障排查文档
+│   ├── gripper_design.md      # 夹爪控制设计文档
+│   └── CHANGELOG.md           # 版本变更记录
 └── pyproject.toml         # 项目元数据
 ```
 
@@ -43,14 +51,13 @@
 
 ### 软件依赖(WSL/Linux)
 
-[`libdm_device.so`](https://gitee.com/kit-miao/dm-tools) 来自达妙官方仓库 `dm-tools/DM_DeviceSDK/`(本仓库不打包,按下面路径配置):
-
 | 依赖 | 来源 | 安装 |
 |---|---|---|
-| `libdm_device.so` | [dm-tools/DM_DeviceSDK/C&C++/lib/linux/](https://gitee.com/kit-miao/dm-tools) | 直接用,不需安装 |
-| `libstdc++ ≥ GLIBCXX_3.4.32` | conda-forge | `bash Miniforge3-Linux-x86_64.sh` |
-| `libusb 1.0.27+` | conda-forge | `conda install -y libusb=1.0.27` |
+| `libdm_device.so` | 已内置于 `vendor/dm_device_sdk/` | 无需额外操作 |
+| `libusb 1.0` | 系统包管理器 | `sudo apt install libusb-1.0-0-dev` |
 | Python 3.10+ | system 或 conda | — |
+
+SDK 二进制文件已放在 `vendor/dm_device_sdk/linux/{x86_64,arm64}/`,代码会自动检测平台架构加载对应 `.so`。`libusb` 也会自动从 `LD_LIBRARY_PATH`、conda 环境、系统路径中搜索。
 
 详细环境配置见 [`docs/troubleshooting.md` 第 7-9 条](docs/troubleshooting.md)。
 
@@ -63,17 +70,6 @@ pip install -e .
 
 安装后即可在任意位置 `from dm_motor import DmDevice`。
 
-### 改 SDK 路径
-
-打开 [`src/dm_motor/sdk.py`](src/dm_motor/sdk.py) 顶部:
-
-```python
-SDK_PATH = "/path/to/dm-tools/DM_DeviceSDK/C&C++/lib/linux/libdm_device.so"
-LIBUSB_PATH = "/path/to/miniforge3/lib/libusb-1.0.so.0"
-```
-
-按你的路径改。
-
 ### 跑通 5M CAN-FD MIT 模式控制
 
 ```bash
@@ -82,6 +78,35 @@ LD_LIBRARY_PATH=/home/ubuntu/miniforge3/lib python -u examples/canfd_mit.py
 ```
 
 电机会以约 2 rad/s 转 3 秒,实时打印位置/速度/扭矩反馈。
+
+### 夹爪力位混合控制
+
+```bash
+LD_LIBRARY_PATH=/home/ubuntu/miniforge3/lib python -u examples/gripper_demo.py
+```
+
+交互菜单支持三种模式:
+- **纯位置**: 无视外力,直接移动到目标角度
+- **纯力矩**: 施加恒定力矩,不管位置
+- **力位混合**: 向目标运动,遇到设定力则停住/柔顺跟随
+
+也可以在代码中直接调用:
+
+```python
+from dm_motor import DmDevice, GripperController
+
+dev = DmDevice()
+dev.open(nom_baud_hz=1_000_000, dat_baud_hz=5_000_000, canfd=True, brs=True)
+
+with GripperController(dev, can_id=0x01, mst_id=0x11) as gripper:
+    gripper.close_gripper(force_limit=3.0)   # 力位混合闭合
+    gripper.move_to(1.57)                    # 纯位置到 90°
+    gripper.set_torque(2.0)                  # 纯力矩 2 Nm
+
+dev.close()
+```
+
+详细设计见 [`docs/gripper_design.md`](docs/gripper_design.md)。
 
 ---
 

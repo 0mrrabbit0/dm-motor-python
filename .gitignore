@@ -10,6 +10,9 @@ build/
 # Locally extracted runtime libs (not redistributable)
 libs/
 
+# Vendor SDK binaries (tracked via git — do NOT ignore)
+# vendor/dm_device_sdk/
+
 # Editor
 .vscode/
 .idea/
@@ -17,3 +20,6 @@ libs/
 # OS
 .DS_Store
 Thumbs.db
+diag_data/
+gripper_calibration.json
+gripper_tuning.json
