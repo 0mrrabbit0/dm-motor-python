@@ -12,3 +12,4 @@ from dm_motor.sdk import (
     TMAX,
 )
 from dm_motor.gripper import GripperController, GripperMode, GripperState
+from dm_motor.lugre import LuGreModel

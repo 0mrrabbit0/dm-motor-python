@@ -39,22 +39,38 @@ def main():
         print("[INIT] Opening CAN-FD 1M/5M ...")
         dev.open(nom_baud_hz=1_000_000, dat_baud_hz=5_000_000, sn=ADAPTER_SN)
 
+        # Quick motor check — reset CAN if in error state
+        for _ in range(5):
+            dev.enable(CAN_ID)
+            time.sleep(0.005)
+        time.sleep(0.2)
+        for _ in range(20):
+            dev.control_mit(CAN_ID, kp=0, kd=1.0, q=0, dq=0, tau=0)
+            time.sleep(0.005)
+        fb = dev.get_feedback(MST_ID)
+        if not fb or fb["err"] not in (0, 1):
+            print("[RECOVER] Motor error, resetting CAN bus...")
+            dev.reset()
+        for _ in range(3):
+            dev.disable(CAN_ID)
+            time.sleep(0.005)
+        time.sleep(0.1)
+
         ctrl = GripperController(
             dev, CAN_ID, MST_ID,
             on_state_change=on_state_change,
         )
 
-        # Try load existing calibration
+        # Load calibration (zero point persisted in motor flash via save_params)
         if os.path.exists(CALIB_PATH):
-            try:
-                ctrl.load_calibration(CALIB_PATH)
-            except Exception as e:
-                print(f"[WARN] Failed to load calibration: {e}")
-
-        if not ctrl._calibrated:
-            print("\n[CALIB] No calibration found. Running calibration...")
+            ctrl.load_calibration(CALIB_PATH)
+        else:
+            print("\n[CALIB] First-time setup. Running full calibration...")
             ctrl.calibrate_auto()
             ctrl.save_calibration(CALIB_PATH)
+
+        # Load LuGre friction model if available
+        ctrl.load_friction()
 
         print("[INIT] Enabling motor ...")
         ctrl.enable()

@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Callable
 
 from dm_motor.sdk import DmDevice
+from dm_motor.lugre import LuGreModel
 
 
 class GripperMode(Enum):
@@ -40,7 +41,7 @@ class GripperState(Enum):
 
 
 # --- Defaults ---
-_DEFAULT_KP_TRACK = 15.0  # validated stable via find_stable_kp sweep
+_DEFAULT_KP_TRACK = 5.0   # software PD gain — lower prevents undervoltage on lead screw
 _DEFAULT_KD_TRACK = 2.0
 _DEFAULT_KP_HOLD = 2.0
 _DEFAULT_KD_HOLD = 1.5
@@ -51,7 +52,7 @@ _DEFAULT_TAU_FRICTION = 0.3   # Coulomb friction compensation (Nm)
 _DEFAULT_MOVE_DURATION = 1.0  # full travel duration (s) — validated smooth at 0.6s/60%
 
 _DEFAULT_HYSTERESIS = 0.8
-_DEFAULT_TAU_SAFETY = 8.0
+_DEFAULT_TAU_SAFETY = 3.0  # lead screw: higher torque causes undervoltage on stall
 
 _LOOP_PERIOD_S = 0.005  # 200Hz — validated stable for lead screw mechanisms
 _TEMP_MOS_MAX = 80
@@ -158,6 +159,9 @@ class GripperController:
         self._traj_end_time = 0.0     # time when trajectory finished
         self._kd_motion = 0.5         # Kd during motion
 
+        # LuGre friction compensation (loaded from gripper_friction.json)
+        self._lugre: LuGreModel | None = None
+
     # ── Calibration ──
 
     def calibrate_auto(self, calib_tau: float = 0.4,
@@ -263,6 +267,9 @@ class GripperController:
         time.sleep(0.3)
         self._dev.set_zero(self._can_id)
         time.sleep(0.1)
+        # Persist zero to motor flash — survives power cycles
+        self._dev.save_params(self._can_id)
+        time.sleep(0.2)
         for _ in range(5):
             self._dev.disable(self._can_id)
             time.sleep(0.005)
@@ -273,7 +280,7 @@ class GripperController:
         self._angle_close = 0.0
         self._angle_open = travel
 
-        print(f"  Zero set at closed position.")
+        print(f"  Zero saved to motor flash (persists across power cycles).")
         print(f"  Closed: {self._angle_close:+.4f} rad (= 0)")
         print(f"  Open:   {self._angle_open:+.4f} rad")
 
@@ -285,6 +292,111 @@ class GripperController:
 
         self._calibrated = True
         print("Calibration complete.\n")
+
+    def auto_home(self, path: str = None):
+        """Auto-home on startup: find closed limit, set zero, apply saved travel.
+
+        Only needs the travel distance from a previous full calibration.
+        Takes ~3-5 seconds. No user interaction required.
+        """
+        if path is None:
+            path = self._default_calib_path()
+        if not os.path.exists(path):
+            raise RuntimeError(
+                "No calibration file. Run calibrate_auto() first to establish travel distance.")
+
+        with open(path) as f:
+            data = json.load(f)
+        travel = data["angle_open"] - data["angle_close"]
+        stroke_mm = data.get("stroke_mm")
+
+        print("[AUTO-HOME] Finding closed limit...")
+        self._stop_loop()
+
+        # Enable motor
+        for _ in range(5):
+            self._dev.enable(self._can_id)
+            time.sleep(0.005)
+        self._enabled = True
+        time.sleep(0.2)
+
+        # Warm up feedback
+        for _ in range(50):
+            self._dev.control_mit(
+                self._can_id, kp=0, kd=1.0, q=0, dq=0, tau=0)
+            time.sleep(0.005)
+
+        # Drive toward closed limit with small torque
+        # Determine direction: close is at the smaller-travel end
+        # If travel < 0, close is at higher angle → drive positive
+        # If travel > 0, close is at lower angle → drive negative
+        close_tau = 0.4 if travel < 0 else -0.4
+
+        last_pos = None
+        last_check = time.monotonic()
+        stable_since = None
+
+        while True:
+            self._dev.control_mit(
+                self._can_id, kp=0, kd=0.5, q=0, dq=0, tau=close_tau)
+            time.sleep(0.005)
+            fb = self._dev.get_feedback(self._mst_id)
+            if not fb:
+                continue
+            if fb["err"] not in (0, 1):
+                # Hit limit hard enough to trigger error → use this as limit
+                pos = fb["q"]
+                print(f"  Closed limit: {pos:+.4f} rad (motor err={fb['err']})")
+                time.sleep(0.1)
+                for _ in range(5):
+                    self._dev.enable(self._can_id)
+                    time.sleep(0.005)
+                time.sleep(0.1)
+                break
+            if fb["err"] == 0:
+                self._dev.enable(self._can_id)
+                time.sleep(0.005)
+                stable_since = None
+                continue
+            pos = fb["q"]
+            now = time.monotonic()
+            if now - last_check >= 0.1:
+                if last_pos is not None and abs(pos - last_pos) < 0.01:
+                    if stable_since is None:
+                        stable_since = now
+                    elif now - stable_since >= 0.3:
+                        print(f"  Closed limit: {pos:+.4f} rad (stalled)")
+                        break
+                else:
+                    stable_since = None
+                last_pos = pos
+                last_check = now
+
+        # Set zero at closed position and persist to flash
+        for _ in range(50):
+            self._dev.control_mit(
+                self._can_id, kp=0, kd=1.0, q=0, dq=0, tau=0)
+            time.sleep(0.005)
+        self._dev.set_zero(self._can_id)
+        time.sleep(0.1)
+        self._dev.save_params(self._can_id)
+        time.sleep(0.2)
+
+        # Disable
+        for _ in range(5):
+            self._dev.disable(self._can_id)
+            time.sleep(0.005)
+        self._enabled = False
+
+        self._angle_close = 0.0
+        self._angle_open = travel
+        self._stroke_mm = stroke_mm
+        self._calibrated = True
+
+        # Save updated calibration
+        self.save_calibration(path)
+
+        print(f"[AUTO-HOME] Done. close=0, open={travel:+.4f} rad")
 
     def save_calibration(self, path: str = None):
         if not self._calibrated:
@@ -307,6 +419,18 @@ class GripperController:
         self._stroke_mm = data.get("stroke_mm")
         self._calibrated = True
         print(f"Calibration loaded: close={self._angle_close:.4f}, open={self._angle_open:.4f}")
+
+    def load_friction(self, path: str = None):
+        if path is None:
+            pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.join(os.path.dirname(os.path.dirname(pkg_dir)),
+                                "gripper_friction.json")
+        if not os.path.exists(path):
+            return False
+        self._lugre = LuGreModel.load(path)
+        print(f"Friction model loaded: Fc={self._lugre.fc:.4f}, Fs={self._lugre.fs:.4f}, "
+              f"vs={self._lugre.vs:.2f}")
+        return True
 
     def _default_calib_path(self):
         pkg_dir = os.path.dirname(os.path.abspath(__file__))
@@ -565,7 +689,15 @@ class GripperController:
             kd = self._kd_motion + (self.kd_track - self._kd_motion) * ramp
 
         error = q_des - self._pos
-        tau_raw = self.kp_track * error
+        tau_pd = self.kp_track * error
+
+        # LuGre friction feedforward compensation
+        if self._lugre is not None:
+            f_friction = self._lugre.step(self._vel, _LOOP_PERIOD_S)
+            tau_raw = tau_pd + f_friction
+        else:
+            tau_raw = tau_pd
+
         tau_raw = max(-self.tau_safety, min(self.tau_safety, tau_raw))
         tau_cmd = self._filter_tau(tau_raw)
         self._send_mit(0, kd, dq=dq_des, tau=tau_cmd)
@@ -607,7 +739,12 @@ class GripperController:
                     dq_des = 0.0
                     kd = self.kd_track
                 error = q_des - self._pos
-                tau_raw = self.kp_track * error
+                tau_pd = self.kp_track * error
+                if self._lugre is not None:
+                    f_friction = self._lugre.step(self._vel, _LOOP_PERIOD_S)
+                    tau_raw = tau_pd + f_friction
+                else:
+                    tau_raw = tau_pd
                 tau_raw = max(-self.tau_safety, min(self.tau_safety, tau_raw))
                 tau_cmd = self._filter_tau(tau_raw)
                 self._send_mit(0, kd, dq=dq_des, tau=tau_cmd)

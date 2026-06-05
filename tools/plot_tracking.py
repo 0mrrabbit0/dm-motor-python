@@ -131,6 +131,7 @@ def main():
             print("No calibration. Run gripper_demo.py first.")
             return
 
+        ctrl.load_friction()
         ctrl.enable()
         time.sleep(0.5)
 

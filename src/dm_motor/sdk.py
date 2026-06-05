@@ -197,6 +197,9 @@ class DmDevice:
                 raise RuntimeError("no USB-CANFD device found")
             sn = found[0] if isinstance(found, (list, tuple)) else found
 
+        self._sn = sn
+        self._nom_baud = nom_baud_hz
+        self._dat_baud = dat_baud_hz
         self._hw = _UsbClass(nom_baud_hz, dat_baud_hz, sn)
         time.sleep(0.5)
         self._hw.setFrameCallback(lambda val: self._on_rx(val))
@@ -212,18 +215,47 @@ class DmDevice:
                 pass
             self._hw = None
 
+    def reset(self, pause_s: float = 4.0):
+        """Reset the CAN bus by closing and reopening the USB adapter.
+
+        The pause lets the motor's comm timeout fire, which transitions
+        it from error → disabled. After reopening, explicit disable
+        commands clear any remaining error latch.
+        """
+        sn = self._sn
+        nom = self._nom_baud
+        dat = self._dat_baud
+        print(f"[DM] Resetting CAN bus (pause {pause_s}s)...", file=sys.stderr)
+        self.close()
+        time.sleep(pause_s)
+        self.open(nom_baud_hz=nom, dat_baud_hz=dat, sn=sn)
+        # Clear error latch → disable → enable sequence
+        for can_id in [0x01, 0x02, 0x03]:
+            for _ in range(5):
+                self.clear_error(can_id)
+                time.sleep(0.005)
+            for _ in range(5):
+                self.disable(can_id)
+                time.sleep(0.005)
+        time.sleep(0.5)
+        print("[DM] CAN bus reset complete.", file=sys.stderr)
+
     def send(self, can_id: int, payload, **_kwargs):
         """Send a CAN frame."""
         if isinstance(payload, bytes):
             payload = list(payload)
         self._hw.fdcanFrameSend(payload, can_id)
 
-    # --- DM motor enable/disable ---
+    # --- DM motor enable/disable/clear ---
     def enable(self, can_id: int, mode_offset: int = MIT_OFFSET):
         self.send(can_id + mode_offset, [0xff]*7 + [0xfc])
 
     def disable(self, can_id: int, mode_offset: int = MIT_OFFSET):
         self.send(can_id + mode_offset, [0xff]*7 + [0xfd])
+
+    def clear_error(self, can_id: int, mode_offset: int = MIT_OFFSET):
+        """Send clear-error command (0xFB). Clears latched fault states."""
+        self.send(can_id + mode_offset, [0xff]*7 + [0xfb])
 
     # --- MIT mode (CTRL_MODE=1) ---
     def control_mit(self, can_id: int, kp: float, kd: float,
