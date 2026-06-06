@@ -222,7 +222,7 @@ $$K_d + F_v > \frac{\partial F_{Stribeck}}{\partial v}\bigg|_{v \approx 0}$$
 
 **目标**：找到从 $(q_0, 0, 0)$ 到 $(q_f, 0, 0)$ 的轨迹（位置、速度、加速度边界条件），使急动度（jerk = 加速度的导数）的积分最小：
 
-$$\min_{q(t)} \int_0^T \dddot{q}(t)^2 \, dt$$
+$$\min_{q(t)} \int_0^T \overset{\cdots}{q}(t)^2 \, dt$$
 
 **边界条件（6 个）**：
 $$q(0) = q_0, \quad \dot{q}(0) = 0, \quad \ddot{q}(0) = 0$$
@@ -243,7 +243,7 @@ $$s(\sigma) = 10\sigma^3 - 15\sigma^4 + 6\sigma^5$$
 | 位置 | $s(\sigma) = 10\sigma^3 - 15\sigma^4 + 6\sigma^5$ | $s(0)=0, s(1)=1$ |
 | 速度 | $\dot{s} = \frac{1}{T}(30\sigma^2 - 60\sigma^3 + 30\sigma^4)$ | $\dot{s}(0)=0, \dot{s}(1)=0$ |
 | 加速度 | $\ddot{s} = \frac{1}{T^2}(60\sigma - 180\sigma^2 + 120\sigma^3)$ | $\ddot{s}(0)=0, \ddot{s}(1)=0$ |
-| 急动度 | $\dddot{s} = \frac{1}{T^3}(60 - 360\sigma + 360\sigma^2)$ | $\dddot{s}(0)=60/T^3$ (有限值) |
+| 急动度 | $\overset{\cdots}{s} = \frac{1}{T^3}(60 - 360\sigma + 360\sigma^2)$ | $\overset{\cdots}{s}(0)=60/T^3$ (有限值) |
 
 **峰值速度**出现在 $\sigma = 0.5$：
 
