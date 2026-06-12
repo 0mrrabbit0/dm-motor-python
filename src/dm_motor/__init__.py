@@ -7,6 +7,7 @@ from dm_motor.sdk import (
     encode_pos_force,
     encode_pos_vel,
     decode_feedback,
+    REC_CALLBACK,
     PMAX,
     VMAX,
     TMAX,

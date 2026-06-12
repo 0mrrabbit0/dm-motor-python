@@ -1,40 +1,18 @@
 """
 Python wrapper for DaMiao motor control via USB-CANFD adapter.
 
-Uses the usb_class Cython driver (vendor/dm_device_sdk/) for USB-CAN communication.
+Uses the official dmcan SDK v1.1.0 for USB-CAN communication.
 Supports MIT, POS_VEL, VEL, and POS_FORCE control modes.
 """
 from enum import IntEnum
 import math
-import os
-import platform
 import struct
 import sys
 import threading
 import time
 
-
-# ---------- Locate and import usb_class driver ----------
-
-def _find_usb_class_dir() -> str:
-    pkg_dir = os.path.dirname(os.path.abspath(__file__))
-    proj_root = os.path.dirname(os.path.dirname(pkg_dir))
-    machine = platform.machine()
-    arch_map = {"x86_64": "x86_64", "aarch64": "arm64", "arm64": "arm64"}
-    arch = arch_map.get(machine, machine)
-    return os.path.join(proj_root, "vendor", "dm_device_sdk", "linux", arch)
-
-_usb_class_dir = _find_usb_class_dir()
-if _usb_class_dir not in sys.path:
-    sys.path.insert(0, _usb_class_dir)
-
-try:
-    from usb_class import usb_class as _UsbClass, can_value_type
-except ImportError as e:
-    raise ImportError(
-        f"usb_class driver not found in {_usb_class_dir}. "
-        f"Ensure usb_class.cpython-*.so is present. Error: {e}"
-    ) from e
+from dmcan import DmCanContext
+from dmcan.dmcan_def import dmcan_channel_can_info
 
 
 # ---------- Motor types & limits ----------
@@ -115,7 +93,9 @@ def encode_mit(kp: float, kd: float, q: float, dq: float, tau: float,
 
 def decode_feedback(payload, pmax: float = PMAX, vmax: float = VMAX,
                     tmax: float = TMAX):
-    if hasattr(payload, 'data'):
+    if hasattr(payload, 'payload'):
+        d = payload.payload
+    elif hasattr(payload, 'data'):
         d = payload.data
     else:
         d = payload
@@ -132,14 +112,12 @@ def decode_feedback(payload, pmax: float = PMAX, vmax: float = VMAX,
 
 
 def encode_pos_force(p_des: float, v_des: float, i_des: float) -> bytes:
-    """Encode POS_FORCE frame: position + velocity limit + current limit."""
     v_u16 = max(0, min(0xFFFF, int(v_des * 100)))
     i_u16 = max(0, min(10000, int(i_des * 10000)))
     return struct.pack('<f', p_des) + struct.pack('<HH', v_u16, i_u16)
 
 
 def encode_pos_vel(pos: float, vel: float) -> bytes:
-    """Encode POS_VEL frame: position + velocity setpoint."""
     if math.isnan(pos) or math.isinf(pos) or math.isnan(vel) or math.isinf(vel):
         raise ValueError(f"pos_vel params must be finite: pos={pos}, vel={vel}")
     return struct.pack('<ff', pos, vel)
@@ -147,12 +125,11 @@ def encode_pos_vel(pos: float, vel: float) -> bytes:
 
 # ---------- High-level wrapper ----------
 
-# Kept for backward compat — unused by the new usb_class backend
 REC_CALLBACK = None
 
 
 class DmDevice:
-    """Motor controller wrapping the usb_class Cython driver."""
+    """Motor controller using the official dmcan SDK v1.1.0."""
 
     MIT_OFFSET = 0x000
     POS_VEL_OFFSET = 0x100
@@ -164,13 +141,14 @@ class DmDevice:
         self.pmax, self.vmax, self.tmax = MOTOR_LIMITS[motor_type]
         self._latest = {}
         self._lock = threading.Lock()
-        self._hw = None
+        self._ctx = None
+        self._dev = None
+        self._recv_cb = None
         self.sent_count = 0
         self.err_count = 0
 
-    def _on_rx(self, frame):
-        """Callback from usb_class when a CAN frame is received."""
-        cid = frame.head.id
+    def _on_rx(self, device, frame):
+        cid = frame.head.can_id
         if cid == 0x7FF:
             return
         try:
@@ -181,104 +159,100 @@ class DmDevice:
             self._latest[cid] = fb
 
     def open(self, nom_baud_hz: int = 1_000_000, dat_baud_hz: int = 5_000_000,
-             sn: str = None, **_kwargs):
-        """Open the USB-CANFD adapter.
-
-        Args:
-            nom_baud_hz: arbitration baud rate (default 1M)
-            dat_baud_hz: data baud rate for CAN-FD (default 5M)
-            sn: adapter serial number (auto-detect if None)
-        """
-        if sn is None:
-            from usb_class import dm_device
-            dev = dm_device()
-            found = dev.usb_get_dm_device()
-            if not found:
-                raise RuntimeError("no USB-CANFD device found")
-            sn = found[0] if isinstance(found, (list, tuple)) else found
-
-        self._sn = sn
+             sn: str = None, canfd: bool = True, **_kwargs):
         self._nom_baud = nom_baud_hz
         self._dat_baud = dat_baud_hz
-        self._hw = _UsbClass(nom_baud_hz, dat_baud_hz, sn)
-        time.sleep(0.5)
-        self._hw.setFrameCallback(lambda val: self._on_rx(val))
-        time.sleep(0.2)
-        print(f"[DM] opened, SN={sn}, baud={nom_baud_hz//1000}K/{dat_baud_hz//1000}K",
+        self._canfd = canfd
+
+        self._ctx = DmCanContext()
+        n = self._ctx.find_devices()
+        if n == 0:
+            raise RuntimeError("no USB-CANFD device found")
+
+        self._dev = self._ctx.get_device(0)
+        if not self._dev.open():
+            raise RuntimeError("device_open failed")
+
+        self._dev.enable_channel(0, True)
+
+        info = dmcan_channel_can_info()
+        info.canfd = canfd
+        info.can_baudrate = nom_baud_hz
+        info.canfd_baudrate = dat_baud_hz
+        info.can_sp = 0.75
+        info.canfd_sp = 0.75
+        if not self._dev.set_channel_baudrate(0, info):
+            raise RuntimeError("set_baud failed")
+
+        self._dev.hook_recv_callback(self._on_rx)
+
+        sn_str = self._dev.get_version() or "unknown"
+        print(f"[DM] opened (SDK v1.1.0), baud={nom_baud_hz//1000}K/{dat_baud_hz//1000}K",
               file=sys.stderr)
 
     def close(self):
-        if self._hw is not None:
+        if self._dev is not None:
             try:
-                self._hw.close()
+                self._dev.enable_channel(0, False)
+                self._dev.close()
             except Exception:
                 pass
-            self._hw = None
+            self._dev = None
+        if self._ctx is not None:
+            try:
+                self._ctx.destroy()
+            except Exception:
+                pass
+            self._ctx = None
 
     def reset(self, pause_s: float = 4.0):
-        """Reset the CAN bus by closing and reopening the USB adapter.
-
-        The pause lets the motor's comm timeout fire, which transitions
-        it from error → disabled. After reopening, explicit disable
-        commands clear any remaining error latch.
-        """
-        sn = self._sn
         nom = self._nom_baud
         dat = self._dat_baud
+        canfd = self._canfd
         print(f"[DM] Resetting CAN bus (pause {pause_s}s)...", file=sys.stderr)
         self.close()
+        self._latest.clear()
         time.sleep(pause_s)
-        self.open(nom_baud_hz=nom, dat_baud_hz=dat, sn=sn)
-        # Clear error latch → disable → enable sequence
-        for can_id in [0x01, 0x02, 0x03]:
-            for _ in range(5):
-                self.clear_error(can_id)
-                time.sleep(0.005)
-            for _ in range(5):
-                self.disable(can_id)
-                time.sleep(0.005)
-        time.sleep(0.5)
+        self.open(nom_baud_hz=nom, dat_baud_hz=dat, canfd=canfd)
+        time.sleep(1.0)
         print("[DM] CAN bus reset complete.", file=sys.stderr)
 
     def send(self, can_id: int, payload, **_kwargs):
-        """Send a CAN frame."""
-        if isinstance(payload, bytes):
-            payload = list(payload)
-        self._hw.fdcanFrameSend(payload, can_id)
+        if isinstance(payload, (list, tuple)):
+            payload = bytes(payload)
+        self._dev.send_can(0, can_id, len(payload), payload,
+                           canfd=self._canfd, brs=self._canfd)
 
     # --- DM motor enable/disable/clear ---
     def enable(self, can_id: int, mode_offset: int = MIT_OFFSET):
-        self.send(can_id + mode_offset, [0xff]*7 + [0xfc])
+        self.send(can_id + mode_offset, bytes([0xff]*7 + [0xfc]))
 
     def disable(self, can_id: int, mode_offset: int = MIT_OFFSET):
-        self.send(can_id + mode_offset, [0xff]*7 + [0xfd])
+        self.send(can_id + mode_offset, bytes([0xff]*7 + [0xfd]))
 
     def clear_error(self, can_id: int, mode_offset: int = MIT_OFFSET):
-        """Send clear-error command (0xFB). Clears latched fault states."""
-        self.send(can_id + mode_offset, [0xff]*7 + [0xfb])
+        self.send(can_id + mode_offset, bytes([0xff]*7 + [0xfb]))
 
     # --- MIT mode (CTRL_MODE=1) ---
     def control_mit(self, can_id: int, kp: float, kd: float,
                     q: float, dq: float, tau: float):
         self.send(can_id + self.MIT_OFFSET,
-                  list(encode_mit(kp, kd, q, dq, tau,
-                                  self.pmax, self.vmax, self.tmax)))
+                  encode_mit(kp, kd, q, dq, tau,
+                             self.pmax, self.vmax, self.tmax))
 
     # --- POS_VEL mode (CTRL_MODE=2) ---
     def control_pos_vel(self, can_id: int, pos: float, vel: float):
-        self.send(can_id + self.POS_VEL_OFFSET,
-                  list(encode_pos_vel(pos, vel)))
+        self.send(can_id + self.POS_VEL_OFFSET, encode_pos_vel(pos, vel))
 
     # --- VEL mode (CTRL_MODE=3) ---
     def control_vel(self, can_id: int, vel_radps: float):
-        self.send(can_id + self.VEL_OFFSET,
-                  list(struct.pack('<f', vel_radps)))
+        self.send(can_id + self.VEL_OFFSET, struct.pack('<f', vel_radps))
 
     # --- POS_FORCE mode (CTRL_MODE=4) ---
     def control_pos_force(self, can_id: int, p_des: float,
                           v_des: float, i_des: float):
         self.send(can_id + self.POS_FORCE_OFFSET,
-                  list(encode_pos_force(p_des, v_des, i_des)))
+                  encode_pos_force(p_des, v_des, i_des))
 
     # --- Feedback ---
     def get_feedback(self, mst_id: int):
@@ -287,27 +261,27 @@ class DmDevice:
 
     # --- Zero position ---
     def set_zero(self, can_id: int, mode_offset: int = MIT_OFFSET):
-        self.send(can_id + mode_offset, [0xff] * 7 + [0xfe])
+        self.send(can_id + mode_offset, bytes([0xff] * 7 + [0xfe]))
 
     # --- Motor parameter read/write/save ---
     def write_param(self, can_id: int, rid: int, value_u32: int):
         idl = can_id & 0xff
         idh = (can_id >> 8) & 0xff
         v = value_u32 & 0xffffffff
-        self.send(0x7FF, [
+        self.send(0x7FF, bytes([
             idl, idh, 0x55, rid,
             v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff,
-        ])
+        ]))
 
     def read_param(self, can_id: int, rid: int):
         idl = can_id & 0xff
         idh = (can_id >> 8) & 0xff
-        self.send(0x7FF, [idl, idh, 0x33, rid, 0, 0, 0, 0])
+        self.send(0x7FF, bytes([idl, idh, 0x33, rid, 0, 0, 0, 0]))
 
     def save_params(self, can_id: int):
         idl = can_id & 0xff
         idh = (can_id >> 8) & 0xff
-        self.send(0x7FF, [idl, idh, 0xAA, 0x01, 0, 0, 0, 0])
+        self.send(0x7FF, bytes([idl, idh, 0xAA, 0x01, 0, 0, 0, 0]))
 
     def switch_ctrl_mode(self, can_id: int, mode: CtrlMode):
         self.write_param(can_id, 10, int(mode))
